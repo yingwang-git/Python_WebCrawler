@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 
 class BaseBilibili:
     def __init__(self):
-        self.name = 'Base Bilibili Crawler'
+        self.name = 'Bilibili Base Crawler'
         self.headers = {
             'accept': '*/*',
             'accept-encoding': 'gzip, deflate, br',

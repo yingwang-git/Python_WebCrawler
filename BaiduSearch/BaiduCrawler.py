@@ -11,9 +11,10 @@ import requests
 from bs4 import BeautifulSoup
 
 
-class BaseCrawler:
+class BaseBaidu:
 
     def __init__(self):
+        self.name = 'Baidu Base Crawler'
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit'
                           '/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36',
@@ -35,10 +36,11 @@ class BaseCrawler:
                 csv_writer.writerows(result)
 
 
-class ResultParser(BaseCrawler):
+class BaiduParser(BaseBaidu):
 
     def __init__(self):
         super().__init__()
+        self.name = 'Baidu Parser'
 
     @staticmethod
     def parse_news(soup: BeautifulSoup):
@@ -68,12 +70,13 @@ class ResultParser(BaseCrawler):
         return news_results, csv_header
 
 
-class BaiduCrawler(BaseCrawler):
+class BaiduCrawler(BaseBaidu):
 
     def __init__(self, cookie):
         super().__init__()
+        self.name = 'Baidu Crawler'
         self.headers['Cookie'] = cookie
-        self.parser = ResultParser()
+        self.parser = BaiduParser()
 
     def search_news(self, words: list, pages: int, output_path: str = None):
 
