@@ -149,3 +149,12 @@
    'bullet_crawler_time': 'crawl time, 爬取时间'
    }
    ```
+
+## TripAdvisor
+### crawl hotels and reviews
+
+### crawl restaurants and reviews
+
+### crawl destinations and reviews
+
+### crawl things and reviews
