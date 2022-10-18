@@ -25,6 +25,12 @@ class BaseXimalayaFM:
         return cate_result
 
     def _generate_cate_urls(self, category: str, page: int = None):
+        """
+        generate urls of all pages for a category
+        :param category: str. name of the category
+        :param page: int. how many pages you want to crawl. defaults to None, i.e., crawl all pages shown in the category (50 pages)
+        :return: list. a list of urls
+        """
         if not page or page > 50:
             print("NOTE: page should between 1 to 50, default crawl 50 pages")
             urls = [self.base_url + category + "/"]
