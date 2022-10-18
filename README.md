@@ -158,3 +158,15 @@
 ### crawl destinations and reviews
 
 ### crawl things and reviews
+
+
+## XimalayaFM
+
+### crawl albums from a category
+1. **Description**: crawl basic information from albums in one category.
+2. **Basic Usage**
+   ```
+   XimalayaFMCrawler().crawl_category(category = 'shangye')
+   ```
+3. **Params**
+4. **Return**: a `pandas.DataFrame` of results.
