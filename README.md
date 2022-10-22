@@ -170,3 +170,12 @@
    ```
 3. **Params**
 4. **Return**: a `pandas.DataFrame` of results.
+
+### crawl album details
+
+### crawl album audios
+
+### crawl uploader details
+
+## crawl album comments
+
