@@ -298,12 +298,12 @@ if __name__ == '__main__':
                              pages=4, threads=num_of_threads, output_file=my_cate_output)
 
     data_category = pd.read_csv(my_csv_dir + my_cate_output)
-    crawler.crawler_album(data_category['album_id'][0:100], threads=num_of_threads, output_file=my_album_output)
+    crawler.crawler_album(data_category['album_id'], threads=num_of_threads, output_file=my_album_output)
 
-    crawler.crawler_track(data_category['album_id'][0:50], threads=num_of_threads, output_file=my_track_output)
+    crawler.crawler_track(data_category['album_id'], threads=num_of_threads, output_file=my_track_output)
 
     data_tracks = pd.read_csv(my_csv_dir + my_track_output)
-    data_trial_tracks = data_tracks[data_tracks['track_audio'].notnull()].reset_index(drop=True)[0:30]
+    data_trial_tracks = data_tracks[data_tracks['track_audio'].notnull()].reset_index(drop=True)
     data_trial_tracks['download_name'] = \
         data_trial_tracks['album_id'].astype(str) + '_' + data_trial_tracks['track_id'].astype(str)
     crawler.downloader_track(data_trial_tracks['track_audio'], download_names=data_trial_tracks['download_name'],
