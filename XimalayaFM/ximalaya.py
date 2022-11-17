@@ -173,7 +173,9 @@ class XimalayaFMParser(BaseXimalayaFM):
                     'track_likes': track['likes'],
                     'track_comments': track['comments'],
                     'track_create': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(track['createdAt'] / 1000)),
-                    'track_audio': track['playUrl32']  # download url for free (trial) tracks. valid for hours.
+                    'track_audio': track['playUrl32'].replace(
+                        'http://aod.cos.tx.xmcdn.com/', 'https://audiopay.cos.tx.xmcdn.com/download/1.0.0/')
+                    # download url for free (trial) tracks. valid for hours.
                 }
                 track_details.append(track_detail)
         return track_details
@@ -297,11 +299,11 @@ class XimalayaFMCrawler(BaseXimalayaFM):
 
 if __name__ == '__main__':
     # settings
-    num_of_threads = 10
+    num_threads = 10
     my_category = '有声书'
     my_subcategory = ['文学', '经典', '成长', '社科', '商业']
-    my_csv_dir = r'E:\DataMining\Git_Python_WebCrawler\XimalayaFM\data'  # absolute path is recommended
-    my_download_dir = r'E:\DataMining\Git_Python_WebCrawler\XimalayaFM\download'
+    my_csv_dir = r'E:\DataMining\Git_Python_WebCrawler\XimalayaFM\data\\'  # absolute path is recommended
+    my_download_dir = r'E:\DataMining\Git_Python_WebCrawler\XimalayaFM\download\\'
     my_cate_output = r'data_album_basic.csv'
     my_album_output = r'data_album_details.csv'
     my_track_output = r'data_tracks.csv'
@@ -310,20 +312,20 @@ if __name__ == '__main__':
     # crawl basic album information by category
     crawler = XimalayaFMCrawler(output_dir=my_csv_dir, download_dir=my_download_dir)
     data_category = crawler.crawler_category(category=my_category, subcategories=my_subcategory, filters=my_filters,
-                                             threads=num_of_threads, output_file=my_cate_output)
+                                             threads=num_threads, output_file=my_cate_output)
 
     # crawl detailed album information
     # data_category = pd.read_csv(my_csv_dir + my_cate_output)
     data_albums = crawler.crawler_details(crawler.crawl_album, data_category['album_id'],
-                                          output_file=my_album_output, threads=num_of_threads)
+                                          output_file=my_album_output, threads=num_threads)
 
     # crawl track information
     data_tracks = crawler.crawler_details(crawler.crawl_track, data_category['album_id'],
-                                          output_file=my_track_output, threads=num_of_threads)
+                                          output_file=my_track_output, threads=num_threads)
 
     # download free (trial) tracks
     # data_tracks = pd.read_csv(my_csv_dir + my_track_output)
-    data_trial_tracks = data_tracks[data_tracks['track_audio'] != ''].reset_index(drop=True)
+    data_trial = data_tracks[data_tracks['track_audio'] != ''].reset_index(drop=True)
+    data_trial['download_name'] = data_trial['album_id'].astype(str) + '_' + data_trial['track_id'].astype(str)
     # crawler.save_csv(data_trial_tracks.to_dict('records'), r'data_tracks_trial.csv')
-    downloaded_names = data_trial_tracks['album_id'].astype(str) + '_' + data_trial_tracks['track_id'].astype(str)
-    crawler.downloader_track(data_trial_tracks['track_audio'], download_names=downloaded_names, threads=num_of_threads)
+    crawler.downloader_track(data_trial['track_audio'], download_names=data_trial['download_name'], threads=num_threads)
