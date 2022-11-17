@@ -164,8 +164,6 @@ class XimalayaFMParser(BaseXimalayaFM):
         for page in range(1, track_json['maxPageId'] + 1):
             tracks = self.get_json(album_url + str(page))['data']['list']
             for track in tracks:
-                if not track['playUrl32']:
-                    pass
                 track_detail = {
                     'album_id': album_id,
                     'track_id': track['trackId'],
@@ -327,5 +325,5 @@ if __name__ == '__main__':
     # data_tracks = pd.read_csv(my_csv_dir + my_track_output)
     data_trial_tracks = data_tracks[data_tracks['track_audio'] != ''].reset_index(drop=True)
     # crawler.save_csv(data_trial_tracks.to_dict('records'), r'data_tracks_trial.csv')
-    download_names = data_trial_tracks['album_id'].astype(str) + '_' + data_trial_tracks['track_id'].astype(str)
-    crawler.downloader_track(data_trial_tracks['track_audio'], download_names=download_names, threads=num_of_threads)
+    downloaded_names = data_trial_tracks['album_id'].astype(str) + '_' + data_trial_tracks['track_id'].astype(str)
+    crawler.downloader_track(data_trial_tracks['track_audio'], download_names=downloaded_names, threads=num_of_threads)
