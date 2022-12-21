@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # Author: Ying Wang
-# Date: 2022/11/7
+# Date: 2022/12/19
 
-import csv
 import json
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -11,16 +11,16 @@ import pandas as pd
 import requests
 
 
-class BaseXimalayaFM:
-    def __init__(self, output_dir, download_dir):
-        self.name = 'XimalayaFM Base Crawler'
+class XimalayaFMCrawler:
+    def __init__(self, db_path=None, download_dir=None):
+        self.name = 'XimalayaFM Crawler'
         self.headers = {'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                                       '(KHTML, like Gecko) Chrome/100.0.4896.60 Safari/537.36'}
-        self.output_dir = output_dir  # directory saving csv results
-        self.download_dir = download_dir  # directory saving downloaded audios
+        self.db_path = db_path
+        self.download_dir = download_dir
 
-    def get_category(self, category: str, subcategory: str = None,
-                     page: int = 1, filters: dict = None):
+    def get_category(self, category: str, subcategory: str = None, page: int = 1, filters: dict = None,
+                     get_total_pages: bool = False):
         cate_url = 'https://www.ximalaya.com/revision/category/queryCategoryPageAlbums'
         category_code, subcategory_code = self._format_category(category, subcategory)
         params = {
@@ -41,22 +41,112 @@ class BaseXimalayaFM:
             # some categories have no filters
             del params['meta']
 
-        return json.loads(requests.get(cate_url, headers=self.headers, params=params).text)
+        category_json = json.loads(requests.get(cate_url, headers=self.headers, params=params).text)
 
-    def get_json(self, url: str):
+        total_pages = category_json['data']['total'] // 50 + 1
+        if get_total_pages:
+            return total_pages if total_pages < 50 else 50
+
+        albums = []
+        for album in category_json['data']['albums']:
+            album_basic = {
+                'album_id': album['albumId'],
+                'album_paid': album['isPaid'],  # is paid. True = need paid or VIP, False = free
+                'album_finished': album['isFinished'],  # is finished. 0 = not available, 1 = serialized, 2 = finished
+                'album_vipType': album['vipType'],  # paid type. 0 = only paid, 1 = only VIP, 2 = VIP or paid
+                'category': category,
+                'subcategory': subcategory
+            }
+            albums.append(album_basic)
+            if self.db_path:
+                self._save2db([album_basic], table_name='album_basic', album_id=album['albumId'])
+        return albums
+
+    def get_album_detail(self, album_id):
+        album_url = f'https://mobile.ximalaya.com/mobile/v1/album/ts-{round(time.time() * 1000)}?albumId={album_id}'
+        album = self._get_json(album_url)['data']['album']
+        details = [{
+            **{'album_id': album_id,
+               'album_title': album['title'],
+               'album_subtitle': album.get('customSubTitle'),
+               'album_info': album['intro'],  # TODO 部分不完整，有省略
+               'album_tags': album.get('tags'),
+               'album_cover': album['coverSmall'].split('!')[0],
+               'album_score': album.get('score'),  # quality score (user evaluation, 0-5). not available for free albums
+               'album_score_10': self._get_album_score(album['albumId']),  # popularity score (0-10). shown on the page
+               'album_create': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(album['createdAt'] / 1000)),
+               'album_tracks': album['tracks'],
+               'album_plays': album['playTimes'],
+               'album_comments': album.get('commentsCount'),
+               'album_subscribes': album['subscribeCount']},
+            **self._parse_album_price(album['albumId']),
+            **self._parse_author(album['uid']),
+            **self._parse_author_verify(album['uid'])
+        }]
+        if self.db_path:
+            self._save2db(details, table_name='album_detail', album_id=album_id)
+        return details
+
+    def get_album_track(self, album_id):
+        album_url = f'https://mobile.ximalaya.com/mobile/v1/album/track/ts-{round(time.time() * 1000)}?' \
+                    f'albumId={album_id}&pageSize=50&pageId='
+        track_json = self._get_json(album_url + '1')['data']
+
+        track_details = []
+        for page in range(1, track_json['maxPageId'] + 1):
+            tracks = self._get_json(album_url + str(page))['data']['list']
+            for track in tracks:
+                track_detail = {
+                    'album_id': album_id,
+                    'track_id': track['trackId'],
+                    'track_name': track['title'],
+                    'track_duration': track['duration'],
+                    'track_plays': track['playtimes'],
+                    'track_likes': track['likes'],
+                    'track_comments': track['comments'],
+                    'track_create': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(track['createdAt'] / 1000)),
+                    'track_audio': track['playUrl32'].replace(
+                        'http://aod.cos.tx.xmcdn.com/', 'https://audiopay.cos.tx.xmcdn.com/download/1.0.0/')
+                    # download url for free (trial) tracks. valid for hours.
+                }
+                track_details.append(track_detail)
+                if self.db_path:
+                    self._save2db([track_detail], table_name='album_track',
+                                  album_id=album_id, track_id=track['trackId'])
+        return track_details
+
+    def crawler_category(self, category: str, subcategories: list = None,
+                         filters: dict = None, pages: int = None, threads: int = 10):
+        print(f' start to crawl albums from category {category} '.center(100, '='))
+        results = []
+        with ThreadPoolExecutor(threads) as t:
+            for subcategory in subcategories:
+                max_pages = self.get_category(category=category, subcategory=subcategory,
+                                              filters=filters, get_total_pages=True)
+                for page in range(1, pages + 1 if pages and pages <= max_pages else max_pages + 1):
+                    # maximum 50 pages for each category
+                    results.append(t.submit(self.get_category, category=category, subcategory=subcategory,
+                                            filters=filters, page=page))
+                    total_results = as_completed(results)
+        return pd.DataFrame(sum([result.result() for result in total_results], []))
+
+    @staticmethod
+    def crawler_threading(func, album_id_list: list, threads: int = 10):
+        print(f' start to run {func.__name__} '.center(100, '='))
+        results = []
+        with ThreadPoolExecutor(threads) as t:
+            for album_id in album_id_list:
+                results.append(t.submit(func, album_id=album_id))
+                total_results = as_completed(results)
+        return pd.DataFrame(sum([result.result() for result in total_results], []))
+
+    def _get_json(self, url: str):
         response = requests.get(url, headers=self.headers)
         return json.loads(response.text)
 
-    def save_csv(self, result: list, output_file: str):
-        with open(f'{self.output_dir}/{output_file}', 'a', newline='', encoding='utf-8-sig') as fp:
-            csv_writer = csv.DictWriter(fp, list(result[0].keys()))
-            if fp.tell() == 0:
-                csv_writer.writeheader()
-            csv_writer.writerows(result)
-
     def _get_categories_map(self):
         categories_url = 'https://m.ximalaya.com/m-revision/page/category/queryCategories'
-        categories = self.get_json(categories_url)['data']
+        categories = self._get_json(categories_url)['data']
         category_list = []
         for item in categories:
             category_details = {
@@ -73,18 +163,11 @@ class BaseXimalayaFM:
                     'subcategory_link': subcategory['link']
                 }
                 category_list.append({**category_details, **subcategory_details})
-        # pd.DataFrame(category_list).to_csv(r'XimalayaFM/dict_categories.csv', index=False, encoding='utf-8-sig')
+        # pd.DataFrame(category_list).to_csv(r'XimalayaFM/map_categories.csv', index=False, encoding='utf-8-sig')
         return pd.DataFrame(category_list)
-
-    def _get_category_page(self, category: str, subcategory: str = None, filters: str = None):
-        total = self.get_category(page=1, category=category, subcategory=subcategory,
-                                  filters=filters)['data']['total']
-        total_pages = total // 50 + 1
-        return total_pages if total_pages < 50 else 50  # maximum 50 pages for each category
 
     def _format_category(self, category: str, subcategory: str = None):
         categories = self._get_categories_map()
-        # categories = pd.read_csv(r'XimalayaFM/dict_categories.csv')
         cate = categories[['category_name', 'category_code']]
         if category.lower() not in cate.values:
             raise ValueError(f'ERROR: category {category} not exist! Please check!')
@@ -113,80 +196,13 @@ class BaseXimalayaFM:
                              "'finished' should be 'no' or 'yes'; 'paid' should be 'no' or 'yes' ")
         return filter_map[key.lower()][value]
 
-
-class XimalayaFMParser(BaseXimalayaFM):
-    def __init__(self, output_dir, download_dir):
-        super().__init__(output_dir, download_dir)
-        self.name = 'XimalayaFM Parser'
-
-    @staticmethod
-    def parse_category(category_json):
-        albums = []
-        for album in category_json['data']['albums']:
-            albums.append({
-                'album_id': album['albumId'],
-                'album_paid': album['isPaid'],  # is paid. True = need paid or VIP, False = free
-                'album_finished': album['isFinished'],  # is finished. 0 = not available, 1 = serialized, 2 = finished
-                'album_vipType': album['vipType'],  # paid type. 0 = only paid, 1 = only VIP, 2 = VIP or paid
-            })
-        return albums
-
-    def parse_album(self, album_id):
-        album_url = f'https://mobile.ximalaya.com/mobile/v1/album/ts-{round(time.time() * 1000)}?albumId={album_id}'
-        album = self.get_json(album_url)['data']['album']
-        details = [{
-            **{'album_id': album_id,
-               'album_title': album['title'],
-               'album_subtitle': album['customSubTitle'],
-               'album_info': album['intro'],
-               # 'album_finished': album['serializeStatus'],
-               'album_tags': album.get('tags'),
-               'album_cover': album['coverSmall'].split('!')[0],
-               'album_score': album.get('score'),  # quality score (user evaluation, 0-5). not available for free albums
-               'album_score_10': self._get_album_score(album['albumId']),  # popularity score (0-10). shown on the page
-               'album_create': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(album['createdAt'] / 1000)),
-               'album_tracks': album['tracks'],
-               'album_plays': album['playTimes'],
-               'album_comments': album.get('commentsCount'),
-               'album_subscribes': album['subscribeCount']},
-            **self._parse_album_price(album['albumId']),
-            **self._parse_author(album['uid']),
-            **self._parse_author_verify(album['uid'])
-        }]
-        return details
-
-    def parse_track(self, album_id):
-        album_url = f'https://mobile.ximalaya.com/mobile/v1/album/track/ts-{round(time.time() * 1000)}?' \
-                    f'albumId={album_id}&pageSize=50&pageId='
-        track_json = self.get_json(album_url + '1')['data']
-
-        track_details = []
-        for page in range(1, track_json['maxPageId'] + 1):
-            tracks = self.get_json(album_url + str(page))['data']['list']
-            for track in tracks:
-                track_detail = {
-                    'album_id': album_id,
-                    'track_id': track['trackId'],
-                    'track_name': track['title'],
-                    'track_duration': track['duration'],
-                    'track_plays': track['playtimes'],
-                    'track_likes': track['likes'],
-                    'track_comments': track['comments'],
-                    'track_create': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(track['createdAt'] / 1000)),
-                    'track_audio': track['playUrl32'].replace(
-                        'http://aod.cos.tx.xmcdn.com/', 'https://audiopay.cos.tx.xmcdn.com/download/1.0.0/')
-                    # download url for free (trial) tracks. valid for hours.
-                }
-                track_details.append(track_detail)
-        return track_details
-
     def _get_album_score(self, album_id):
         score_url = f'https://www.ximalaya.com/revision/comment/albumStatistics/{album_id}'
-        return self.get_json(score_url)['data'].get('albumScore')  # popularity score. 0-10
+        return self._get_json(score_url)['data'].get('albumScore')  # popularity score. 0-10
 
     def _parse_album_price(self, album_id):
         price_url = f'https://www.ximalaya.com/revision/bdsp/album/pay/schema?id={album_id}&productType=1'
-        price = self.get_json(price_url)['data']['albumPrice']
+        price = self._get_json(price_url)['data']['albumPrice']
 
         if price.get('retailAlbum'):
             album_price = price['retailAlbum']['unBroughtTotalAmount']
@@ -203,7 +219,7 @@ class XimalayaFMParser(BaseXimalayaFM):
 
     def _parse_author(self, author_id):
         author_url = f'https://www.ximalaya.com/revision/user/basic?uid={author_id}'
-        author = self.get_json(author_url)['data']
+        author = self._get_json(author_url)['data']
         return {
             'author_id': author['uid'],
             'author_name': author['nickName'],
@@ -221,67 +237,96 @@ class XimalayaFMParser(BaseXimalayaFM):
 
     def _parse_author_verify(self, author_id):
         verify_url = f'https://m.ximalaya.com/m-revision/page/anchor/queryAnchorPage/{author_id}'
-        verify = self.get_json(verify_url)['data']['anchorInfo']['userInfo']
+        verify = self._get_json(verify_url)['data']['anchorInfo']['userInfo']
         return {
             'author_verified': verify['verifyStatus'],  # is verified. 1 = not verified, 3 = verified
             'author_verified_type': verify['verifyType'],  # verified type. 1 = person, 2 = company
             'author_verified_desc': verify.get('ptitle')
         }
 
+    def _create_db(self):
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        cur = conn.cursor()
 
-class XimalayaFMCrawler(BaseXimalayaFM):
-    def __init__(self, output_dir, download_dir):
-        super().__init__(output_dir, download_dir)
-        self.name = 'XimalayaFM Crawler'
-        self.parser = XimalayaFMParser(output_dir, download_dir)
+        # table: album_basic
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS album_basic (
+            album_id INTEGER PRIMARY KEY,
+            album_paid TEXT, /* is paid. True=need paid or VIP, False=free */
+            album_finished INTEGER,  /* is finished. 0=not available, 1=serialized, 2=finished */
+            album_vipType INTEGER,  /* paid type. 0=only paid, 1=only VIP, 2=VIP or paid */
+            category TEXT,
+            subcategory TEXT
+            )
+        """)
 
-    def crawler_category(self, output_file: str, category: str, subcategories: list = None,
-                         filters: dict = None, pages: int = None, threads: int = 10):
-        print(f' start to crawl albums from category {category} '.center(100, '='))
-        results = []
-        with ThreadPoolExecutor(threads) as t:
-            for subcategory in subcategories:
-                max_pages = self._get_category_page(category=category, subcategory=subcategory, filters=filters)
-                for page in range(1, pages + 1 if pages and pages <= max_pages else max_pages + 1):
-                    # maximum 50 pages for each category
-                    results.append(t.submit(self._crawl_category, category=category, subcategory=subcategory,
-                                            filters=filters, page=page, output_file=output_file))
-                    total_results = as_completed(results)
-        return pd.DataFrame(sum([result.result() for result in total_results], []))
+        # table: album_detail
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS album_detail (
+            album_id INTEGER PRIMARY KEY,
+            album_title TEXT,
+            album_subtitle TEXT,
+            album_info TEXT,
+            album_tags TEXT,
+            album_cover TEXT, 
+            album_score REAL, /* quality score (user evaluation, 0-5). not available for free albums */
+            album_score_10 REAL, /* popularity score (0-10). shown on the page */
+            album_create TEXT,
+            album_tracks INTEGER,
+            album_plays INTEGER,
+            album_comments INTEGER,
+            album_subscribes INTEGER,
+            album_paid_type INTEGER, /* paid type. 0=VIP or free (no price), 1=by album, 2=by track */
+            album_price REAL, 
+            album_price_single REAL,
+            author_id INTEGER,
+            author_name TEXT,
+            author_gender INTEGER,
+            author_level INTEGER,
+            author_vip INTEGER,
+            author_signature TEXT, 
+            author_desc TEXT,
+            author_headimg TEXT, 
+            author_following INTEGER,
+            author_followers INTEGER,
+            author_albums INTEGER,
+            author_tracks INTEGER,
+            author_verified INTEGER, /* is verified. 1 = not verified, 3 = verified */
+            author_verified_type INTEGER, /* verified type. 1 = person, 2 = company */
+            author_verified_desc TEXT
+            )
+        """)
 
-    def _crawl_category(self, output_file: str, category: str, subcategory: str = None,
-                        filters: dict = None, page: int = None):
-        albums = self.get_category(category=category, subcategory=subcategory,
-                                   filters=filters, page=page)
-        albums_result = [{**album, **{'category': category, 'subcategory': subcategory}}
-                         for album in self.parser.parse_category(albums)]
-        self.save_csv(albums_result, output_file=output_file)
-        print(f'Successfully save result to {output_file} from category: {category}, {subcategory}, page: {page}')
-        return albums_result
+        # table: album_track
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS album_track (
+            album_id INTEGER,
+            track_id INTEGER PRIMARY KEY,
+            track_name TEXT,
+            track_duration INTEGER, 
+            track_plays INTEGER, 
+            track_likes INTEGER, 
+            track_comments INTEGER, 
+            track_create TEXT,
+            track_audio TEXT
+            )
+        """)
 
-    @staticmethod
-    def crawler_details(func, album_id_list: list, output_file: str, threads: int = 10):
-        print(f' start to run {func.__name__} '.center(100, '='))
-        results = []
-        with ThreadPoolExecutor(threads) as t:
-            for album_id in album_id_list:
-                results.append(t.submit(func, album_id=album_id, output_file=output_file))
-                total_results = as_completed(results)
-        return pd.DataFrame(sum([result.result() for result in total_results], []))
+        cur.close()
 
-    def crawl_album(self, album_id, output_file: str):
-        time.sleep(1)
-        album_details = self.parser.parse_album(album_id)
-        self.save_csv(album_details, output_file=output_file)
-        print(f'Successfully save album details to {output_file} from album: {album_id}')
-        return album_details
-
-    def crawl_track(self, album_id, output_file: str):
-        time.sleep(1)
-        track_details = self.parser.parse_track(album_id)
-        self.save_csv(track_details, output_file=output_file)
-        print(f'Successfully save track details to {output_file} from album: {album_id}')
-        return track_details
+    def _save2db(self, result: list, table_name, album_id='', track_id=''):
+        self._create_db()
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        cur = conn.cursor()
+        try:
+            pd.DataFrame(result).to_sql(name=table_name, con=conn, if_exists='append', index=False)
+            print(f'successfully save result {album_id} {track_id}')
+        except sqlite3.IntegrityError:
+            print(f'{album_id} {track_id} result already exist in database, pass!')
+            pass
+        finally:
+            cur.close()
+            conn.close()
 
     def downloader_track(self, urls: list, download_names: list, threads: int = 10):
         print(' start to download tracks '.center(100, '='))
@@ -290,8 +335,9 @@ class XimalayaFMCrawler(BaseXimalayaFM):
                 t.submit(self._download_track, url=url, download_name=download_name)
 
     def _download_track(self, url: str, download_name: str):
-        time.sleep(1)
         response = requests.get(url, headers=self.headers)
+        if not self.download_dir:
+            raise AttributeError('ERROR: please set download directory before downloading audios')
         with open(f'{self.download_dir}/{download_name}.m4a', 'wb') as f:
             f.write(response.content)
             print(f'Successfully download track {download_name} to {self.download_dir}')
@@ -301,31 +347,17 @@ if __name__ == '__main__':
     # settings
     num_threads = 10
     my_category = '有声书'
-    my_subcategory = ['文学', '经典', '成长', '社科', '商业']
-    my_csv_dir = r'E:\DataMining\Git_Python_WebCrawler\XimalayaFM\data\\'  # absolute path is recommended
-    my_download_dir = r'E:\DataMining\Git_Python_WebCrawler\XimalayaFM\download\\'
-    my_cate_output = r'data_album_basic.csv'
-    my_album_output = r'data_album_details.csv'
-    my_track_output = r'data_tracks.csv'
+    my_subcategories = ['文学', '经典', '成长', '社科', '商业']
+    # map_categories = pd.read_csv(r'XimalayaFM/data/map_categories.csv')
+    # my_subcategories = list(map_categories.loc[map_categories['category_name'] == my_category, 'subcategory_name'])
     my_filters = {'announcer': 'single', 'paid': 'yes'}
 
-    # crawl basic album information by category
-    crawler = XimalayaFMCrawler(output_dir=my_csv_dir, download_dir=my_download_dir)
-    data_category = crawler.crawler_category(category=my_category, subcategories=my_subcategory, filters=my_filters,
-                                             threads=num_threads, output_file=my_cate_output)
+    my_db_path = r'XimalayaFM\data\ximalaya.db'
+    my_download_dir = r'XimalayaFM\download\\'
 
-    # crawl detailed album information
-    # data_category = pd.read_csv(my_csv_dir + my_cate_output)
-    data_albums = crawler.crawler_details(crawler.crawl_album, data_category['album_id'],
-                                          output_file=my_album_output, threads=num_threads)
-
-    # crawl track information
-    data_tracks = crawler.crawler_details(crawler.crawl_track, data_category['album_id'],
-                                          output_file=my_track_output, threads=num_threads)
-
-    # download free (trial) tracks
-    # data_tracks = pd.read_csv(my_csv_dir + my_track_output)
-    data_trial = data_tracks[data_tracks['track_audio'] != ''].reset_index(drop=True)
-    data_trial['download_name'] = data_trial['album_id'].astype(str) + '_' + data_trial['track_id'].astype(str)
-    # crawler.save_csv(data_trial_tracks.to_dict('records'), r'data_tracks_trial.csv')
-    crawler.downloader_track(data_trial['track_audio'], download_names=data_trial['download_name'], threads=num_threads)
+    crawler = XimalayaFMCrawler(db_path=my_db_path, download_dir=my_download_dir)
+    df_basic = crawler.crawler_category(category=my_category, subcategories=my_subcategories,
+                                        filters=my_filters, threads=num_threads)
+    df_basic = df_basic.drop_duplicates(subset=['album_id']).reset_index(drop=True)
+    df_details = crawler.crawler_threading(crawler.get_album_detail, album_id_list=df_basic['album_id'])
+    df_tracks = crawler.crawler_threading(crawler.get_album_track, album_id_list=df_basic['album_id'])
