@@ -91,7 +91,6 @@ class XimalayaFMCrawler:
         album_url = f'https://mobile.ximalaya.com/mobile/v1/album/track/ts-{round(time.time() * 1000)}?' \
                     f'albumId={album_id}&pageSize=50&pageId='
         track_json = self._get_json(album_url + '1')['data']
-
         track_details = []
         for page in range(1, track_json['maxPageId'] + 1):
             tracks = self._get_json(album_url + str(page))['data']['list']
@@ -107,7 +106,7 @@ class XimalayaFMCrawler:
                     'track_create': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(track['createdAt'] / 1000)),
                     'track_audio': track['playUrl32'].replace(
                         'http://aod.cos.tx.xmcdn.com/', 'https://audiopay.cos.tx.xmcdn.com/download/1.0.0/')
-                    # download url for free (trial) tracks. valid for hours.
+                    # download url for free (trial) tracks. valid for about 3 hours.
                 }
                 track_details.append(track_detail)
                 if self.db_path:
@@ -329,6 +328,8 @@ class XimalayaFMCrawler:
             conn.close()
 
     def downloader_track(self, urls: list, download_names: list, threads: int = 10):
+        if len(urls) != len(download_names):
+            raise ValueError('the list of urls and download_names must be of the same length')
         print(' start to download tracks '.center(100, '='))
         with ThreadPoolExecutor(threads) as t:
             for url, download_name in zip(urls, download_names):
@@ -356,8 +357,32 @@ if __name__ == '__main__':
     my_download_dir = r'XimalayaFM\download\\'
 
     crawler = XimalayaFMCrawler(db_path=my_db_path, download_dir=my_download_dir)
+
+    # crawl albums from a category
     df_basic = crawler.crawler_category(category=my_category, subcategories=my_subcategories,
                                         filters=my_filters, threads=num_threads)
+
+    # crawl album details
     df_basic = df_basic.drop_duplicates(subset=['album_id']).reset_index(drop=True)
-    df_details = crawler.crawler_threading(crawler.get_album_detail, album_id_list=df_basic['album_id'])
-    df_tracks = crawler.crawler_threading(crawler.get_album_track, album_id_list=df_basic['album_id'])
+    df_details = crawler.crawler_threading(crawler.get_album_detail,
+                                           album_id_list=df_basic['album_id'], threads=num_threads)
+
+    # crawl track details
+    df_tracks = crawler.crawler_threading(crawler.get_album_track,
+                                          album_id_list=df_basic['album_id'], threads=num_threads)
+
+    # download track audios
+    crawler.downloader_track(urls=df_tracks['track_audio'], download_names=df_tracks['download_name'],
+                             threads=num_threads)
+
+    # connect to database and save results to csv files
+    # connection = sqlite3.connect(my_db_path)
+    # data_basic = pd.read_sql("""select * from album_basic""", connection)
+    # data_basic.to_csv(r'XimalayaFM/data/ximalaya_album_basic.csv', encoding='utf-8-sig', index=False)
+    #
+    # data_detail = pd.read_sql("""select * from album_detail""", connection)
+    # data_detail.to_csv(r'XimalayaFM/data/ximalaya_album_details.csv', encoding='utf-8-sig', index=False)
+    #
+    # data_tracks = pd.read_sql("""select * from album_track""", connection)
+    # data_tracks.to_csv(r'XimalayaFM/data/ximalaya_album_tracks.csv', encoding='utf-8-sig', index=False)
+
